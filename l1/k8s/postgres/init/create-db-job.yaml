@@ -1,0 +1,92 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postgres-create-db-job
+  namespace: db
+spec:
+  template:
+    spec:
+      containers:
+      - name: create-dbs
+        image: bitnami/postgresql:latest
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            export URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}"
+            echo "POSTGRES_HOST: ${POSTGRES_HOST}"
+            echo "POSTGRES_PORT: ${POSTGRES_PORT}"
+            echo "POSTGRES_USER: ${POSTGRES_USER}"
+            echo "POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}"
+            echo "MAX_RETRIES: ${MAX_RETRIES}"
+            echo "RETRY_INTERVAL: ${RETRY_INTERVAL}"
+            echo "URL: ${URL}"
+            
+            
+            echo "Waiting for PostgreSQL to be available at ${POSTGRES_HOST}:${POSTGRES_PORT}..."
+            
+            # Check if pg_isready is available
+            if ! command -v pg_isready &> /dev/null; then
+              echo "Error: pg_isready command not found. Please install PostgreSQL client tools."
+              exit 1
+            fi
+            
+            attempt=1
+            while [ $attempt -le $MAX_RETRIES ]; do
+              if pg_isready -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" -d "postgres"; then
+                echo "PostgreSQL is available! Running"
+                cat /scripts/create-dbs.sql
+                if psql "${URL}" -f /scripts/create-dbs.sql -v ON_ERROR_STOP=1; then
+                  exit 0
+                fi
+                echo "Failed to execute script /scripts/create-dbs.sql."
+                exit 1
+              fi
+            
+              echo "Attempt $attempt/$MAX_RETRIES: PostgreSQL not yet available (pg_isready returned $?). Retrying in $RETRY_INTERVAL seconds..."
+              sleep "$RETRY_INTERVAL"
+              attempt=$((attempt + 1))
+            done
+
+            echo "Error: PostgreSQL was not available after $MAX_RETRIES attempts!"
+            exit 1
+
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secrets
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: postgres-config
+              key: POSTGRES_HOST
+        - name: POSTGRES_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: postgres-config
+              key: POSTGRES_PORT
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secrets
+              key: POSTGRES_USER
+        - name: MAX_RETRIES
+          valueFrom:
+            configMapKeyRef:
+              name: postgres-db-conf
+              key: MAX_RETRIES
+        - name: RETRY_INTERVAL
+          valueFrom:
+            configMapKeyRef:
+              name: postgres-db-conf
+              key: RETRY_INTERVAL
+        volumeMounts:
+        - name: db-scripts
+          mountPath: /scripts
+      restartPolicy: OnFailure
+      volumes:
+      - name: db-scripts
+        configMap:
+          name: postgres-db-conf
+  backoffLimit: 3
