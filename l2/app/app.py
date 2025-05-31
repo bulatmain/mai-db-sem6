@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, session
+from flask import Flask, request, jsonify, session, Response
 from flask_sqlalchemy import SQLAlchemy
 from redis import Redis
 import uuid
@@ -123,7 +123,7 @@ def get_product(product_id):
     cached = redis_client.get(f'product:{product_id}')
     if cached:
         return jsonify(json.loads(cached)), 200
-    product = Product.query.get(product_id)
+    product = db.session.get(Product, product_id)
     if not product:
         return jsonify({'error': 'Product not found'}), 404
     product_data = {'id': product.id, 'name': product.name, 'price': product.price, 'stock': product.stock}
@@ -137,7 +137,7 @@ def update_product(product_id):
     user_id = check_token(token, required_role='admin')
     if not user_id:
         return jsonify({'error': 'Unauthorized or not an admin'}), 401
-    product = Product.query.get(product_id)
+    product = db.session.get(Product, product_id)
     if not product:
         return jsonify({'error': 'Product not found'}), 404
     data = request.get_json()
@@ -156,7 +156,7 @@ def delete_product(product_id):
     user_id = check_token(token, required_role='admin')
     if not user_id:
         return jsonify({'error': 'Unauthorized or not an admin'}), 401
-    product = Product.query.get(product_id)
+    product = db.session.get(Product, product_id)
     if not product:
         return jsonify({'error': 'Product not found'}), 404
     db.session.delete(product)
@@ -239,7 +239,7 @@ def create_order():
         db.session.add(order_item)
     db.session.commit()
     redis_client.delete(cart_key)
-    # Store notification for the user
+    # Store and publish notification for the user
     notification = json.dumps({
         'order_id': order.id,
         'status': 'Pending',
@@ -248,6 +248,7 @@ def create_order():
     })
     redis_client.lpush(f'notifications:{user_id}', notification)
     redis_client.ltrim(f'notifications:{user_id}', 0, 99)  # Keep last 100 notifications
+    redis_client.publish(f'user_notifications:{user_id}', notification)
     redis_client.publish('orders', notification)
     return jsonify({'message': 'Order created', 'order_id': order.id}), 201
 
@@ -265,7 +266,7 @@ def update_order_status(order_id):
         return jsonify({'error': 'Order not found'}), 404
     order.status = new_status
     db.session.commit()
-    # Store notification for the order's user
+    # Store and publish notification for the order's user
     notification = json.dumps({
         'order_id': order_id,
         'status': new_status,
@@ -274,10 +275,11 @@ def update_order_status(order_id):
     })
     redis_client.lpush(f'notifications:{order.user_id}', notification)
     redis_client.ltrim(f'notifications:{order.user_id}', 0, 99)  # Keep last 100 notifications
+    redis_client.publish(f'user_notifications:{order.user_id}', notification)
     redis_client.publish('orders', notification)
     return jsonify({'message': 'Status updated'}), 200
 
-# Получение уведомлений
+# Получение исторических уведомлений
 @app.route('/notifications', methods=['GET'])
 def notifications():
     token = request.headers.get('Authorization')
@@ -290,6 +292,31 @@ def notifications():
         return jsonify({'notifications': []}), 200
     notifications = [json.loads(notification) for notification in notifications]
     return jsonify({'notifications': notifications}), 200
+
+# Подписка на уведомления через Pub/Sub
+@app.route('/notifications/sub', methods=['GET'])
+def notifications_sub():
+    token = request.headers.get('Authorization')
+    user_id = check_token(token)
+    if not user_id:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    def stream():
+        pubsub = redis_client.pubsub()
+        pubsub.subscribe(f'user_notifications:{user_id}')
+        timeout = 30
+        start_time = time.time()
+        yield 'data: {"message": "Subscribed to notifications"}\n\n'
+        while time.time() - start_time < timeout:
+            message = pubsub.get_message(timeout=1)
+            if message and message['type'] == 'message':
+                data = json.loads(message['data'])
+                yield f'data: {json.dumps(data)}\n\n'
+            time.sleep(0.1)
+        yield 'data: {"message": "Subscription timed out"}\n\n'
+        pubsub.close()
+
+    return Response(stream(), mimetype='text/event-stream')
 
 if __name__ == '__main__':
     with app.app_context():
