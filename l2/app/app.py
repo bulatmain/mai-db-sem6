@@ -176,6 +176,29 @@ def get_products():
     redis_client.setex('products', 300, json.dumps(product_list))
     return jsonify(product_list), 200
 
+# Получение содержимого корзины
+@app.route('/cart', methods=['GET'])
+def get_cart():
+    token = request.headers.get('Authorization')
+    user_id = check_token(token)
+    if not user_id:
+        return jsonify({'error': 'Unauthorized'}), 401
+    cart_key = f'cart:{user_id}'
+    cart = redis_client.get(cart_key)
+    cart = json.loads(cart) if cart else {}
+    return jsonify({'cart': cart}), 200
+
+# Очистка корзины
+@app.route('/cart', methods=['DELETE'])
+def delete_cart():
+    token = request.headers.get('Authorization')
+    user_id = check_token(token)
+    if not user_id:
+        return jsonify({'error': 'Unauthorized'}), 401
+    cart_key = f'cart:{user_id}'
+    redis_client.delete(cart_key)
+    return jsonify({'message': 'Cart deleted'}), 200
+
 # Добавление товара в корзину
 @app.route('/cart/add', methods=['POST'])
 def add_to_cart():
@@ -185,11 +208,12 @@ def add_to_cart():
         return jsonify({'error': 'Unauthorized'}), 401
     data = request.get_json()
     product_id = data.get('product_id')
-    quantity = data.get('quantity', 1)
+    quantity = int(data.get('quantity', 1))
+    product = db.session.get(Product, product_id)
+    if product is None:
+        return jsonify({'error': f'Product {product_id} not found'}), 404
     cart_key = f'cart:{user_id}'
     cart = redis_client.get(cart_key)
-    if cart == None:
-        return jsonify({'error': f'Cart for user {user_id} not found'}), 404
     cart = json.loads(cart) if cart else {}
     cart[str(product_id)] = cart.get(str(product_id), 0) + quantity
     redis_client.setex(cart_key, 86400, json.dumps(cart))
@@ -215,7 +239,16 @@ def create_order():
         db.session.add(order_item)
     db.session.commit()
     redis_client.delete(cart_key)
-    redis_client.publish('orders', json.dumps({'order_id': order.id, 'status': 'Pending'}))
+    # Store notification for the user
+    notification = json.dumps({
+        'order_id': order.id,
+        'status': 'Pending',
+        'timestamp': int(time.time()),
+        'message': f'Order {order.id} created with status Pending'
+    })
+    redis_client.lpush(f'notifications:{user_id}', notification)
+    redis_client.ltrim(f'notifications:{user_id}', 0, 99)  # Keep last 100 notifications
+    redis_client.publish('orders', notification)
     return jsonify({'message': 'Order created', 'order_id': order.id}), 201
 
 # Обновление статуса заказа (только для админа)
@@ -227,12 +260,21 @@ def update_order_status(order_id):
         return jsonify({'error': 'Unauthorized or not an admin'}), 401
     data = request.get_json()
     new_status = data.get('status')
-    order = Order.query.get(order_id)
+    order = db.session.get(Order, order_id)
     if not order:
         return jsonify({'error': 'Order not found'}), 404
     order.status = new_status
     db.session.commit()
-    redis_client.publish('orders', json.dumps({'order_id': order_id, 'status': new_status}))
+    # Store notification for the order's user
+    notification = json.dumps({
+        'order_id': order_id,
+        'status': new_status,
+        'timestamp': int(time.time()),
+        'message': f'Order {order_id} status updated to {new_status}'
+    })
+    redis_client.lpush(f'notifications:{order.user_id}', notification)
+    redis_client.ltrim(f'notifications:{order.user_id}', 0, 99)  # Keep last 100 notifications
+    redis_client.publish('orders', notification)
     return jsonify({'message': 'Status updated'}), 200
 
 # Получение уведомлений
@@ -242,16 +284,12 @@ def notifications():
     user_id = check_token(token)
     if not user_id:
         return jsonify({'error': 'Unauthorized'}), 401
-    pubsub = redis_client.pubsub()
-    pubsub.subscribe('orders')
-    timeout = 30
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        message = pubsub.get_message()
-        if message and message['type'] == 'message':
-            return jsonify(json.loads(message['data'])), 200
-        time.sleep(0.1)
-    return jsonify({'message': 'No new notifications'}), 200
+    notifications_key = f'notifications:{user_id}'
+    notifications = redis_client.lrange(notifications_key, 0, -1)
+    if not notifications:
+        return jsonify({'notifications': []}), 200
+    notifications = [json.loads(notification) for notification in notifications]
+    return jsonify({'notifications': notifications}), 200
 
 if __name__ == '__main__':
     with app.app_context():
