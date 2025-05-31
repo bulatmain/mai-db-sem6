@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  namespace: db
+data:
+  POSTGRES_HOST: "postgres-headless.db.svc.cluster.local"
+  POSTGRES_PORT: "5432"

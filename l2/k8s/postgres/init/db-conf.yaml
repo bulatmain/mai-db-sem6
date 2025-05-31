@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-db-conf
+  namespace: db
+data:
+  MAX_RETRIES: "30"
+  RETRY_INTERVAL: "30"
+  create-dbs.sql: |
+    CREATE EXTENSION IF NOT EXISTS dblink;
+
+    DO $$
+      BEGIN
+        PERFORM dblink_exec('', 'CREATE DATABASE db');
+        EXCEPTION WHEN duplicate_database 
+        THEN RAISE NOTICE '%, skipping', SQLERRM USING ERRCODE = SQLSTATE;
+    END
+    $$;

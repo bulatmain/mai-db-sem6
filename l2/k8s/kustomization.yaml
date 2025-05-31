@@ -1,0 +1,10 @@
+resources:
+#  Postgres
+  - postgres/configMap.yaml
+  - postgres/secret.yaml
+  - postgres/service.yaml
+  - postgres/statefulset.yaml
+  - postgres/init/db-conf.yaml
+  - postgres/init/create-db-job.yaml
+# Redis
+  - redis/deployment.yaml
