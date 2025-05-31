@@ -4,7 +4,7 @@ metadata:
   name: shop-app
   namespace: db
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: shop-app
@@ -20,25 +20,65 @@ spec:
         ports:
         - containerPort: 5000
         env:
-        - name: POSTGRES_USER
-          value: "postgres"
-        - name: POSTGRES_PASSWORD
-          value: "admin123"
-        - name: POSTGRES_DB
-          value: "db"
+        - name: PG_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: shop-app-secret
+              key: PG_USERNAME
+        - name: PG_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: shop-app-secret
+              key: PG_PASSWORD
+        - name: PG_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: shop-app-config
+              key: PG_HOST
+        - name: PG_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: shop-app-config
+              key: PG_PORT
+        - name: PG_DB
+          valueFrom:
+            configMapKeyRef:
+              name: shop-app-config
+              key: PG_DB
+        - name: REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: shop-app-config
+              key: REDIS_HOST
+        - name: REDIS_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: shop-app-config
+              key: REDIS_PORT
+        - name: REDIS_DB
+          valueFrom:
+            configMapKeyRef:
+              name: shop-app-config
+              key: REDIS_DB
         resources:
-              requests:
-                memory: "128Mi"
-                cpu: "125m"
-              limits:
-                memory: "256Mi"
-                cpu: "250m"
+          requests:
+            memory: "128Mi"
+            cpu: "125m"
+          limits:
+            memory: "256Mi"
+            cpu: "250m"
+        volumeMounts:
+        - name: log-storage
+          mountPath: /app/logs
+      volumes:
+      - name: log-storage
+        persistentVolumeClaim:
+          claimName: shop-app-log-pvc
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: shop-app-service
-  namespace: db
 spec:
   selector:
     app: shop-app
@@ -47,3 +87,39 @@ spec:
     port: 80
     targetPort: 5000
   type: ClusterIP
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: shop-app-secret
+  namespace: db
+type: Opaque
+stringData:
+  PG_USERNAME: postgres
+  PG_PASSWORD: admin123
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shop-app-config
+  namespace: db
+data:
+  PG_HOST: postgres-headless
+  PG_PORT: "5432"
+  PG_DB: db
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shop-app-log-pvc
+  namespace: db
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 500Mi
+  storageClassName: standard
